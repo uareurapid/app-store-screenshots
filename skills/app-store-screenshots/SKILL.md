@@ -11,8 +11,8 @@ Scaffold a pre-built Next.js + ShadCN editor that lets the user design and expor
 
 - Live preview at the canvas's true resolution (scaled to fit)
 - Drag-to-reorder slides, inline text editing, layout switcher per slide
-- Drop-target screenshot picker (file → embedded data URI)
-- Auto-save to `localStorage` (debounced)
+- Drop-target screenshot picker (file → saved to `public/screenshots/uploaded/<hash>.png`)
+- Auto-save to **`app-store-screenshots.json`** at the project root (git-trackable) + `localStorage` mirror
 - Easy iOS ↔ Android platform switch — separate slide decks live side by side
 - One-click bulk PNG export at every Apple/Google-required resolution via `html-to-image`
 - Light/dark variant toggle per slide, theme presets, locale select
@@ -126,7 +126,7 @@ Otherwise, leave the defaults — the user can rewrite copy in the editor.
 bun dev    # → http://localhost:3000
 ```
 
-Tell the user to open the URL and start editing. The editor auto-saves; they can close the tab and resume.
+Tell the user to open the URL and start editing. The editor auto-saves to **`app-store-screenshots.json`** at the project root (plus a `localStorage` mirror for instant paint). Uploaded screenshots land in `public/screenshots/uploaded/<hash>.png`. Both are git-trackable — committing them means another machine can `git clone` and resume the exact deck.
 
 ## Step 3: Coach the User on Copy
 
@@ -293,9 +293,9 @@ If exports come out blank or with black screen rectangles:
 |---------|-----|
 | Edited `page.tsx` instead of using the editor | Roll back the edit; let users iterate in the browser |
 | Tried to rebuild device frames from scratch | They're in `src/components/editor/device-frames.tsx` — modify there |
-| Pasted screenshots into git directly | `public/screenshots/...` is fine to commit; data-URI uploads stored in `localStorage` aren't shareable across machines |
+| Pasted screenshots into git directly | `public/screenshots/...` is fine to commit. Drop-target uploads are now also written to `public/screenshots/uploaded/<hash>.png` — commit both that folder **and** `app-store-screenshots.json` so collaborators reproduce your deck after `git clone`. |
 | Wrong directory layout for tablet screenshots | See Step 2 — `android/tablet-7/portrait/{locale}/...` etc. |
-| Reset wiped the deck | Reset clears `localStorage`; export first or back up `localStorage` JSON before resetting |
+| Reset wiped the deck | Reset clears in-memory state and re-saves defaults to `app-store-screenshots.json`. Recover by `git checkout app-store-screenshots.json` if it was committed, or export first before resetting. |
 | Export is blank | Source PNGs probably have alpha — flatten to RGB |
 | `bun dev` port collision | Template defaults to `next dev`; let Next pick the next free port (3001+) |
 

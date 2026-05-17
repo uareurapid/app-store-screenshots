@@ -7,32 +7,71 @@ import type { Device, ProjectState } from "./types";
 const HISTORY_LIMIT = 50;
 // Coalesce rapid edits (typing, slider drags) into a single undo step.
 const COALESCE_MS = 500;
+// Debounce file/localStorage writes — frequent enough to feel instant, infrequent enough not to thrash disk.
+const SAVE_DEBOUNCE_MS = 600;
 
-function load(): ProjectState {
-  if (typeof window === "undefined") return DEFAULT_PROJECT;
+function mergeWithDefaults(parsed: Partial<ProjectState>): ProjectState {
+  return {
+    ...DEFAULT_PROJECT,
+    ...parsed,
+    slidesByDevice: {
+      ...DEFAULT_PROJECT.slidesByDevice,
+      ...(parsed.slidesByDevice || {}),
+    },
+  };
+}
+
+function loadFromLocalStorage(): ProjectState | null {
+  if (typeof window === "undefined") return null;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_PROJECT;
-    const parsed = JSON.parse(raw) as ProjectState;
-    return {
-      ...DEFAULT_PROJECT,
-      ...parsed,
-      slidesByDevice: { ...DEFAULT_PROJECT.slidesByDevice, ...parsed.slidesByDevice },
-    };
+    if (!raw) return null;
+    return mergeWithDefaults(JSON.parse(raw) as Partial<ProjectState>);
   } catch {
-    return DEFAULT_PROJECT;
+    return null;
   }
 }
 
-function save(state: ProjectState): { ok: true } | { ok: false; error: string } {
+async function loadFromFile(): Promise<ProjectState | null> {
+  if (typeof window === "undefined") return null;
+  try {
+    const resp = await fetch("/api/project", { cache: "no-store" });
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as { ok: boolean; state: Partial<ProjectState> | null };
+    if (!json.ok || !json.state) return null;
+    return mergeWithDefaults(json.state);
+  } catch {
+    return null;
+  }
+}
+
+function saveToLocalStorage(state: ProjectState): { ok: true } | { ok: false; error: string } {
   if (typeof window === "undefined") return { ok: true };
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     return { ok: true };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.warn("Autosave failed", e);
     return { ok: false, error: msg };
+  }
+}
+
+async function saveToFile(state: ProjectState): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (typeof window === "undefined") return { ok: true };
+  try {
+    const resp = await fetch("/api/project", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(state),
+    });
+    if (!resp.ok) {
+      return { ok: false, error: `HTTP ${resp.status}` };
+    }
+    const json = (await resp.json()) as { ok: boolean; error?: string };
+    if (!json.ok) return { ok: false, error: json.error || "Unknown error" };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -55,29 +94,52 @@ export function useProject() {
   const futureRef = useRef<ProjectState[]>([]);
   const lastPushAt = useRef(0);
 
-  // Hydrate once from localStorage
+  // Hydrate: prefer file (git-tracked) → localStorage (cache) → defaults.
+  // localStorage is consulted first for instant paint, then file overwrites if present.
   useEffect(() => {
-    const loaded = load();
-    _setState(loaded);
-    pastRef.current = [];
-    futureRef.current = [];
-    lastPushAt.current = 0;
-    setHydrated(true);
+    let cancelled = false;
+    const cached = loadFromLocalStorage();
+    if (cached) _setState(cached);
+
+    void (async () => {
+      const fromFile = await loadFromFile();
+      if (cancelled) return;
+      if (fromFile) {
+        _setState(fromFile);
+      }
+      pastRef.current = [];
+      futureRef.current = [];
+      lastPushAt.current = 0;
+      setHydrated(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Debounced autosave
+  // Debounced autosave to BOTH localStorage (fast, offline) and file (git-trackable).
   useEffect(() => {
     if (!hydrated) return;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
-      const result = save(state);
-      if (result.ok) {
-        setSavedAt(Date.now());
-        setSaveError(null);
-      } else {
-        setSaveError(result.error);
-      }
-    }, 400);
+      const localResult = saveToLocalStorage(state);
+      void saveToFile(state).then((fileResult) => {
+        if (fileResult.ok && localResult.ok) {
+          setSavedAt(Date.now());
+          setSaveError(null);
+        } else if (!fileResult.ok && !localResult.ok) {
+          setSaveError(fileResult.error);
+        } else if (!fileResult.ok) {
+          // Local cache succeeded but file save failed — work isn't git-portable yet.
+          setSavedAt(Date.now());
+          setSaveError(`File save failed: ${fileResult.error}`);
+        } else {
+          setSavedAt(Date.now());
+          setSaveError(localResult.ok ? null : localResult.error);
+        }
+      });
+    }, SAVE_DEBOUNCE_MS);
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };

@@ -21,10 +21,26 @@ async function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+async function uploadDataUrl(dataUrl: string): Promise<string | null> {
+  try {
+    const resp = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dataUrl }),
+    });
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as { ok: boolean; path?: string };
+    return json.ok && json.path ? json.path : null;
+  } catch {
+    return null;
+  }
+}
+
 export function ScreenshotPicker({ label, value, onChange }: Props) {
   const inputRef = React.useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [uploading, setUploading] = React.useState(false);
 
   async function handleFile(file: File) {
     setError(null);
@@ -36,12 +52,25 @@ export function ScreenshotPicker({ label, value, onChange }: Props) {
       setError("Image too large (>8MB)");
       return;
     }
+    let dataUrl: string;
     try {
-      const dataUrl = await fileToDataUrl(file);
-      setImage(dataUrl, dataUrl);
-      onChange(dataUrl);
+      dataUrl = await fileToDataUrl(file);
     } catch {
       setError("Failed to read file");
+      return;
+    }
+    // Try to persist to disk so the screenshot survives a git clone.
+    // If the upload endpoint is unreachable (e.g. static export), fall back
+    // to the inline data URI — still works in the current session.
+    setUploading(true);
+    const uploadedPath = await uploadDataUrl(dataUrl);
+    setUploading(false);
+    if (uploadedPath) {
+      setImage(uploadedPath, dataUrl);
+      onChange(uploadedPath);
+    } else {
+      setImage(dataUrl, dataUrl);
+      onChange(dataUrl);
     }
   }
 
@@ -50,11 +79,13 @@ export function ScreenshotPicker({ label, value, onChange }: Props) {
   const previewSrc = isData ? value : hasValue ? img(value) : "";
   // Only flag "image not found" when the path is a real URL that we tried and failed.
   const knownMissing = hasValue && !isData && didFail(value);
-  const valueLabel = !hasValue
-    ? "drop image, or click Pick"
-    : isData
-      ? "uploaded image"
-      : value.replace(/^.*\/(?=[^/]+\/[^/]+$)/, "…/");
+  const valueLabel = uploading
+    ? "saving…"
+    : !hasValue
+      ? "drop image, or click Pick"
+      : isData
+        ? "uploaded image (not on disk)"
+        : value.replace(/^.*\/(?=[^/]+\/[^/]+$)/, "…/");
 
   return (
     <div className="space-y-1">
